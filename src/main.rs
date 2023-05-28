@@ -22,12 +22,12 @@ use zip::ZipArchive;
 const DIRECTORY: &str = "/home/palad1nz0/Downloads";
 const REGION: &str = "ap-southeast-1";
 const BUCKET_NAME: &str = "bob-ap-southeast-1";
-const USE_DEFAULT: bool = true;
+const USE_DEFAULT: bool = false;
 
 #[tokio::main]
 async fn main() -> Result<(), Error> {
-    let mut project_name = String::new();
     println!("Project name: ");
+    let mut project_name = String::new();
     match io::stdin().read_line(&mut project_name) {
         Ok(_) => {
             project_name = project_name.to_string().trim_matches('\n').to_string();
@@ -112,7 +112,8 @@ async fn main() -> Result<(), Error> {
             .unwrap_or_else(|e| panic!("{}", DisplayErrorContext(&e)));
     }
 
-    let template_str = upload_files_to_s3(&project_name, file_paths_names, &s3_client).await;
+    let (template_str, template_url) =
+        upload_files_to_s3(&project_name, file_paths_names, &s3_client).await;
     let template_json = serde_json::from_str::<Value>(&template_str).unwrap();
     let parameters = template_json
         .get("Parameters")
@@ -164,7 +165,7 @@ async fn main() -> Result<(), Error> {
                         .as_str()
                         .unwrap_or("Unknown type")
                 );
-                print!("Enter parameter value: ");
+                println!("Enter parameter value: ");
 
                 let mut input = String::new();
                 match io::stdin().read_line(&mut input) {
@@ -172,7 +173,7 @@ async fn main() -> Result<(), Error> {
                         parameter_builders.push(
                             Parameter::builder()
                                 .parameter_key(key)
-                                .parameter_value(input)
+                                .parameter_value(input.trim_matches('\n').to_string())
                                 .build(),
                         );
                     }
@@ -181,13 +182,14 @@ async fn main() -> Result<(), Error> {
             }
         }
     }
+
     let cloudformation_client = CloudformationClient::new(&config);
     // TODO: better way of handling capabilities?
     let stack_id = match cloudformation_client
         .create_stack()
         .stack_name(&project_name)
         .set_parameters(Some(parameter_builders.clone()))
-        .template_body(&template_str)
+        .template_url(&template_url)
         .capabilities(Capability::CapabilityNamedIam)
         .send()
         .await
@@ -204,7 +206,7 @@ async fn main() -> Result<(), Error> {
                     .update_stack()
                     .stack_name(&project_name)
                     .set_parameters(Some(parameter_builders))
-                    .template_body(&template_str)
+                    .template_url(&template_url)
                     .capabilities(Capability::CapabilityNamedIam)
                     .send()
                     .await
@@ -342,8 +344,9 @@ async fn upload_files_to_s3(
     project_name: &String,
     file_paths_names: Vec<(PathBuf, String)>,
     client: &aws_sdk_s3::Client,
-) -> String {
+) -> (String, String) {
     let mut json_str = String::new();
+    let mut template_url = String::new();
     for (path, name) in file_paths_names {
         let mut file = File::open(&path).unwrap();
         let mut file_contents = Vec::new();
@@ -352,6 +355,15 @@ async fn upload_files_to_s3(
         let ends_in_json = name.ends_with(".json");
         if ends_in_json {
             json_str = std::str::from_utf8(&file_contents).unwrap().to_string();
+            let region_string = if REGION == "us-east-1" {
+                String::new()
+            } else {
+                format!(".{}", REGION)
+            };
+            template_url = format!(
+                "https://{}.s3{}.amazonaws.com/{}/{}",
+                BUCKET_NAME, region_string, project_name, name
+            );
         }
 
         client
@@ -364,6 +376,6 @@ async fn upload_files_to_s3(
             .unwrap_or_else(|e| panic!("{}", DisplayErrorContext(&e)));
         println!("Uploaded file: {}", name);
     }
-
-    json_str
+    println!("template_url: {}", template_url);
+    (json_str, template_url)
 }
