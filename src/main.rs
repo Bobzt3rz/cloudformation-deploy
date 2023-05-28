@@ -308,8 +308,6 @@ fn unzip_file(zip_path: &PathBuf) -> Vec<(PathBuf, String)> {
             None => continue,
         };
 
-        println!("{}", name);
-
         if (*file.name()).ends_with('/') {
             println!("File {} extracted to \"{}\"", i, outpath.display());
             fs::create_dir_all(&outpath).unwrap();
