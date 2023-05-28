@@ -1,6 +1,8 @@
 use std::fs::{self, File};
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
+use std::thread;
+use std::time::Duration;
 
 use aws_config::meta::region::RegionProviderChain;
 use aws_sdk_cloudformation::operation::create_stack::CreateStackError;
@@ -10,23 +12,29 @@ use aws_sdk_dynamodb::error::DisplayErrorContext;
 use aws_sdk_s3::operation::list_objects_v2::ListObjectsV2Error;
 use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::types::{
-    BucketLocationConstraint, CreateBucketConfiguration, Delete, ObjectIdentifier,
-    VersioningConfiguration,
+    BucketLocationConstraint, CreateBucketConfiguration, ObjectIdentifier, VersioningConfiguration,
 };
 use aws_sdk_s3::{Client, Error};
 use aws_types::region::Region;
 use serde_json::{json, Value};
 use zip::ZipArchive;
 
-const PROJECT_NAME: &str = "test";
 const DIRECTORY: &str = "/home/palad1nz0/Downloads";
 const REGION: &str = "ap-southeast-1";
 const BUCKET_NAME: &str = "bob-ap-southeast-1";
-const PREV_FOLDER_NAME: &str = "prev";
 const USE_DEFAULT: bool = true;
 
 #[tokio::main]
 async fn main() -> Result<(), Error> {
+    let mut project_name = String::new();
+    println!("Project name: ");
+    match io::stdin().read_line(&mut project_name) {
+        Ok(_) => {
+            project_name = project_name.to_string().trim_matches('\n').to_string();
+        }
+        _ => panic!("Invalid input"),
+    };
+
     let zip_path = get_last_modified_zip_in_directory(DIRECTORY).unwrap();
     let zip_path_str = zip_path.display().to_string();
     let folder_name_index = match zip_path_str.rfind('/') {
@@ -34,8 +42,6 @@ async fn main() -> Result<(), Error> {
         None => panic!("Invalid path"),
     };
     let folder_name = &zip_path_str[folder_name_index + 1..zip_path_str.len() - 4];
-    println!("{}", folder_name);
-    panic!("early panic");
     let file_paths_names = unzip_file(&zip_path);
 
     let region_provider = RegionProviderChain::first_try(Region::new(REGION));
@@ -47,11 +53,12 @@ async fn main() -> Result<(), Error> {
     let list_resp = s3_client
         .list_objects_v2()
         .bucket(BUCKET_NAME)
-        .prefix(PROJECT_NAME)
+        .prefix(&project_name)
         .send()
         .await;
 
-    let (has_bucket, prev_obj_keys) = match list_resp {
+    // Do something with prev_obj_keys?
+    let (has_bucket, _prev_obj_keys) = match list_resp {
         Ok(val) => {
             let contents = val.contents().unwrap_or_default();
             let keys: Vec<ObjectIdentifier> = contents
@@ -105,39 +112,7 @@ async fn main() -> Result<(), Error> {
             .unwrap_or_else(|e| panic!("{}", DisplayErrorContext(&e)));
     }
 
-    if prev_obj_keys.len() > 0 {
-        for prev_obj_key in &prev_obj_keys {
-            let prev_key_str = prev_obj_key.key().unwrap().to_string();
-            let prev_key_split: Vec<&str> = prev_key_str.split('/').collect();
-            if prev_key_split[1] == "prev" {
-                continue;
-            }
-            s3_client
-                .copy_object()
-                .bucket(BUCKET_NAME)
-                .copy_source(format!("{}/{}", BUCKET_NAME, prev_key_str))
-                .key(format!(
-                    "{}/{}/{}",
-                    PROJECT_NAME,
-                    PREV_FOLDER_NAME,
-                    prev_key_str.splitn(2, '/').nth(1).unwrap().to_string()
-                ))
-                .send()
-                .await
-                .unwrap_or_else(|e| panic!("{}", DisplayErrorContext(&e)));
-        }
-
-        let delete_builder = Delete::builder().set_objects(Some(prev_obj_keys)).build();
-        s3_client
-            .delete_objects()
-            .bucket(BUCKET_NAME)
-            .delete(delete_builder)
-            .send()
-            .await
-            .unwrap_or_else(|e| panic!("{}", DisplayErrorContext(&e)));
-    }
-
-    let template_str = upload_files_to_s3(file_paths_names, &s3_client).await;
+    let template_str = upload_files_to_s3(&project_name, file_paths_names, &s3_client).await;
     let template_json = serde_json::from_str::<Value>(&template_str).unwrap();
     let parameters = template_json
         .get("Parameters")
@@ -168,7 +143,7 @@ async fn main() -> Result<(), Error> {
                 parameter_builders.push(
                     Parameter::builder()
                         .parameter_key("CGDeploymentPath")
-                        .parameter_value(PROJECT_NAME)
+                        .parameter_value(format!("{}/{}", &project_name, folder_name))
                         .build(),
                 );
             }
@@ -207,23 +182,72 @@ async fn main() -> Result<(), Error> {
         }
     }
     let cloudformation_client = CloudformationClient::new(&config);
-
-    match cloudformation_client
+    // TODO: better way of handling capabilities?
+    let stack_id = match cloudformation_client
         .create_stack()
-        .stack_name(PROJECT_NAME)
-        .set_parameters(Some(parameter_builders))
-        .template_body(template_str)
-        .capabilities(Capability::CapabilityIam)
+        .stack_name(&project_name)
+        .set_parameters(Some(parameter_builders.clone()))
+        .template_body(&template_str)
+        .capabilities(Capability::CapabilityNamedIam)
         .send()
         .await
     {
-        Ok(res) => println!("Deployed stack: {}", res.stack_id.unwrap()),
+        Ok(res) => {
+            let stack_id = res.stack_id.unwrap();
+            println!("Deploying stack: {}...", stack_id);
+            stack_id
+        }
         Err(e) => match e.into_service_error() {
             CreateStackError::AlreadyExistsException(_) => {
                 println!("Stack with name already exists, updating previous stack...");
+                match cloudformation_client
+                    .update_stack()
+                    .stack_name(&project_name)
+                    .set_parameters(Some(parameter_builders))
+                    .template_body(&template_str)
+                    .capabilities(Capability::CapabilityNamedIam)
+                    .send()
+                    .await
+                {
+                    Ok(res) => {
+                        let stack_id = res.stack_id().unwrap();
+                        println!("Updating stack: {}...", stack_id);
+                        stack_id.to_string()
+                    }
+                    Err(e) => panic!("{}", DisplayErrorContext(&e)),
+                }
             }
             e => panic!("{}", DisplayErrorContext(&e)),
         },
+    };
+    // poll status of stack
+    let mut in_progress = true;
+    while in_progress {
+        match cloudformation_client
+            .describe_stacks()
+            .stack_name(&stack_id)
+            .send()
+            .await
+        {
+            Ok(res) => {
+                let stacks = res.stacks.as_ref().unwrap();
+                let status = match stacks.get(0) {
+                    Some(s) => s.stack_status.as_ref().unwrap().as_str(),
+                    None => "Unknown status",
+                };
+                match status {
+                    s if s.ends_with("PROGRESS") => {
+                        println!("{}", s);
+                        thread::sleep(Duration::from_secs(2));
+                    }
+                    s => {
+                        println!("{}", s);
+                        in_progress = false;
+                    }
+                }
+            }
+            Err(e) => panic!("{}", DisplayErrorContext(&e)),
+        }
     }
 
     Ok(())
@@ -315,6 +339,7 @@ fn unzip_file(zip_path: &PathBuf) -> Vec<(PathBuf, String)> {
 }
 
 async fn upload_files_to_s3(
+    project_name: &String,
     file_paths_names: Vec<(PathBuf, String)>,
     client: &aws_sdk_s3::Client,
 ) -> String {
@@ -331,7 +356,7 @@ async fn upload_files_to_s3(
 
         client
             .put_object()
-            .key(format!("{}/{}", PROJECT_NAME, name))
+            .key(format!("{}/{}", &project_name, name))
             .bucket(BUCKET_NAME)
             .body(ByteStream::from(file_contents))
             .send()
