@@ -1,5 +1,5 @@
 use std::fs::{self, File};
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::Duration;
@@ -22,11 +22,13 @@ use zip::ZipArchive;
 const DIRECTORY: &str = "/home/palad1nz0/Downloads";
 const REGION: &str = "ap-southeast-1";
 const BUCKET_NAME: &str = "bob-ap-southeast-1";
-const USE_DEFAULT: bool = false;
+const USE_DEFAULT: bool = true;
 
 #[tokio::main]
 async fn main() -> Result<(), Error> {
-    println!("Project name: ");
+    print!("Enter project name: ");
+    io::stdout().flush().unwrap();
+
     let mut project_name = String::new();
     match io::stdin().read_line(&mut project_name) {
         Ok(_) => {
@@ -165,7 +167,8 @@ async fn main() -> Result<(), Error> {
                         .as_str()
                         .unwrap_or("Unknown type")
                 );
-                println!("Enter parameter value: ");
+                print!("Enter parameter value: ");
+                io::stdout().flush().unwrap();
 
                 let mut input = String::new();
                 match io::stdin().read_line(&mut input) {
@@ -376,6 +379,5 @@ async fn upload_files_to_s3(
             .unwrap_or_else(|e| panic!("{}", DisplayErrorContext(&e)));
         println!("Uploaded file: {}", name);
     }
-    println!("template_url: {}", template_url);
     (json_str, template_url)
 }
