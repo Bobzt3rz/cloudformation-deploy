@@ -16,6 +16,7 @@ use aws_sdk_s3::types::{
 };
 use aws_sdk_s3::{Client, Error};
 use aws_types::region::Region;
+use futures::future;
 use serde_json::{json, Value};
 use zip::ZipArchive;
 
@@ -43,6 +44,7 @@ async fn main() -> Result<(), Error> {
         Some(index) => index,
         None => panic!("Invalid path"),
     };
+
     let folder_name = &zip_path_str[folder_name_index + 1..zip_path_str.len() - 4];
     let file_paths_names = unzip_file(&zip_path);
 
@@ -343,39 +345,44 @@ fn unzip_file(zip_path: &PathBuf) -> Vec<(PathBuf, String)> {
 
 async fn upload_files_to_s3(
     project_name: &String,
-    file_paths_names: Vec<(PathBuf, String)>,
+    file_path_names: Vec<(PathBuf, String)>,
     client: &aws_sdk_s3::Client,
 ) -> (String, String) {
-    let mut json_str = String::new();
-    let mut template_url = String::new();
-    for (path, name) in file_paths_names {
+    let resps = future::join_all(file_path_names.into_iter().map(|(path, name)| async move {
         let mut file = File::open(&path).unwrap();
         let mut file_contents = Vec::new();
         file.read_to_end(&mut file_contents).unwrap();
-
-        let ends_in_json = name.ends_with(".json");
-        if ends_in_json {
-            json_str = std::str::from_utf8(&file_contents).unwrap().to_string();
-            let region_string = if REGION == "us-east-1" {
-                String::new()
-            } else {
-                format!(".{}", REGION)
-            };
-            template_url = format!(
-                "https://{}.s3{}.amazonaws.com/{}/{}",
-                BUCKET_NAME, region_string, project_name, name
-            );
-        }
-
         client
             .put_object()
             .key(format!("{}/{}", &project_name, name))
             .bucket(BUCKET_NAME)
-            .body(ByteStream::from(file_contents))
+            .body(ByteStream::from(file_contents.clone()))
             .send()
             .await
             .unwrap_or_else(|e| panic!("{}", DisplayErrorContext(&e)));
         println!("Uploaded file: {}", name);
+        match name.ends_with(".json") {
+            true => {
+                let template_str = std::str::from_utf8(&file_contents).unwrap().to_string();
+                let region_string = if REGION == "us-east-1" {
+                    String::new()
+                } else {
+                    format!(".{}", REGION)
+                };
+                let template_url = format!(
+                    "https://{}.s3{}.amazonaws.com/{}/{}",
+                    BUCKET_NAME, region_string, project_name, name
+                );
+                Some((template_str, template_url))
+            }
+            false => None,
+        }
+    }))
+    .await;
+
+    let template: Option<(String, String)> = resps.iter().flatten().cloned().next();
+    match template {
+        Some(t) => t,
+        None => panic!("No template found"),
     }
-    (json_str, template_url)
 }
