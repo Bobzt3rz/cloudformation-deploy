@@ -20,9 +20,11 @@ use futures::future;
 use serde_json::{json, Value};
 use zip::ZipArchive;
 
-const DIRECTORY: &str = "/home/palad1nz0/Downloads";
-const REGION: &str = "ap-southeast-1";
-const BUCKET_NAME: &str = "bob-ap-southeast-1";
+const DIRECTORY: &str = "/home/bunnavit/Downloads";
+// const REGION: &str = "ap-southeast-1";
+const REGION: &str = "us-west-2";
+// const BUCKET_NAME: &str = "ap-bob-dev";
+const BUCKET_NAME: &str = "bob-us-west-2";
 const USE_DEFAULT: bool = true;
 
 #[tokio::main]
@@ -153,6 +155,7 @@ async fn main() -> Result<(), Error> {
                 );
             }
             _ => {
+                println!("Key: {}", key);
                 println!(
                     "Description: {}",
                     value
@@ -196,6 +199,7 @@ async fn main() -> Result<(), Error> {
         .set_parameters(Some(parameter_builders.clone()))
         .template_url(&template_url)
         .capabilities(Capability::CapabilityNamedIam)
+        .capabilities(Capability::CapabilityAutoExpand)
         .send()
         .await
     {
@@ -213,6 +217,7 @@ async fn main() -> Result<(), Error> {
                     .set_parameters(Some(parameter_builders))
                     .template_url(&template_url)
                     .capabilities(Capability::CapabilityNamedIam)
+                    .capabilities(Capability::CapabilityAutoExpand)
                     .send()
                     .await
                 {
@@ -361,7 +366,7 @@ async fn upload_files_to_s3(
             .await
             .unwrap_or_else(|e| panic!("{}", DisplayErrorContext(&e)));
         println!("Uploaded file: {}", name);
-        match name.ends_with(".json") {
+        match name.ends_with(".json") && name.contains("stack_template") {
             true => {
                 let template_str = std::str::from_utf8(&file_contents).unwrap().to_string();
                 let region_string = if REGION == "us-east-1" {
